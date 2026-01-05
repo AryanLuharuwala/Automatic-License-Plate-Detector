@@ -1,0 +1,29 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "alpr_tollplaza",
+    "user": "postgres",
+    "password": "your_password"
+  },
+  "camera": {
+    "source": 0,
+    "width": 1280,
+    "height": 720,
+    "fps": 30
+  },
+  "yolo": {
+    "model_path": "models/license_plate_detector.pt",
+    "confidence": 0.7,
+    "device": "cpu"
+  },
+  "ocr": {
+    "languages": ["en"],
+    "gpu": false,
+    "confidence": 0.5
+  },
+  "node": {
+    "node_id": "CAM_001",
+    "location": "Entry Gate A"
+  }
+}
