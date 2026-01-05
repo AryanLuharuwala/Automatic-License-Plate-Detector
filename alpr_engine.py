@@ -1,17 +1,62 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
-import easyocr
 import json
 import re
 from typing import Optional, Tuple, List
 import torch
+import os
+
+# Fix for Pillow 10.0+ compatibility with EasyOCR
+try:
+    from PIL import Image
+    if not hasattr(Image, 'ANTIALIAS'):
+        # ANTIALIAS was removed in Pillow 10.0, replaced with LANCZOS
+        Image.ANTIALIAS = Image.LANCZOS
+        print("✓ Applied Pillow 10.0+ compatibility patch")
+except Exception as e:
+    print(f"⚠ Could not apply Pillow compatibility patch: {e}")
+
+import easyocr
+
+# #region agent log
+LOG_PATH = r"c:\Users\maazs\Documents\Projects\ALPR_TollPlaza_System\.cursor\debug.log"
+def _log(location, message, data=None, hypothesisId=None):
+    try:
+        import json as _json
+        log_entry = {"sessionId": "debug-session", "runId": "run1", "location": location, "message": message, "data": data or {}, "timestamp": int(__import__("time").time() * 1000)}
+        if hypothesisId: log_entry["hypothesisId"] = hypothesisId
+        with open(LOG_PATH, "a", encoding="utf-8") as f: f.write(_json.dumps(log_entry) + "\n")
+    except: pass
+# #endregion
 
 class ALPREngine:
     def __init__(self, config_path: str = "config.json"):
         """Initialize ALPR engine with YOLO and EasyOCR"""
-        with open(config_path, 'r') as f:
-            config = json.load(f)
+        # #region agent log
+        _log("alpr_engine.py:13", "Loading config for ALPR", {"config_path": config_path}, "A")
+        # #endregion
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            # #region agent log
+            _log("alpr_engine.py:14", "Config loaded", {"has_yolo": "yolo" in config, "has_ocr": "ocr" in config}, "B")
+            # #endregion
+        except FileNotFoundError as e:
+            # #region agent log
+            _log("alpr_engine.py:13", "Config file not found", {"error": str(e)}, "A")
+            # #endregion
+            raise
+        except json.JSONDecodeError as e:
+            # #region agent log
+            _log("alpr_engine.py:13", "Config JSON decode error", {"error": str(e)}, "A")
+            # #endregion
+            raise
+        except KeyError as e:
+            # #region agent log
+            _log("alpr_engine.py:16", "Missing config key", {"error": str(e)}, "B")
+            # #endregion
+            raise
         
         self.yolo_config = config['yolo']
         self.ocr_config = config['ocr']
@@ -87,6 +132,14 @@ class ALPREngine:
     
     def preprocess_plate(self, plate_img: np.ndarray) -> np.ndarray:
         """Preprocess plate image for better OCR"""
+        # #region agent log
+        _log("alpr_engine.py:91", "Before preprocess_plate", {"plate_img_shape": plate_img.shape if plate_img is not None else None, "plate_img_is_none": plate_img is None}, "D")
+        # #endregion
+        if plate_img is None or plate_img.size == 0:
+            # #region agent log
+            _log("alpr_engine.py:91", "Invalid plate image", {}, "D")
+            # #endregion
+            raise ValueError("Plate image is None or empty")
         # Convert to grayscale
         gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
         
@@ -112,24 +165,49 @@ class ALPREngine:
         Extract text from plate image using EasyOCR
         Returns: (plate_text, confidence) or None
         """
+        # #region agent log
+        _log("alpr_engine.py:read_plate_text:1", "read_plate_text() called", {"plate_img_shape": plate_img.shape if plate_img is not None else None}, "M")
+        # #endregion
+        
         # Preprocess image
         processed = self.preprocess_plate(plate_img)
+        # #region agent log
+        _log("alpr_engine.py:read_plate_text:2", "After preprocess_plate()", {"processed_shape": processed.shape if processed is not None else None}, "M")
+        # #endregion
         
         # Run OCR
+        # #region agent log
+        _log("alpr_engine.py:read_plate_text:3", "Before ocr_reader.readtext()", {}, "M")
+        # #endregion
         results = self.ocr_reader.readtext(processed)
+        # #region agent log
+        _log("alpr_engine.py:read_plate_text:4", "After ocr_reader.readtext()", {"results_count": len(results), "results": str(results)[:200]}, "M")
+        # #endregion
         
         if not results:
+            # #region agent log
+            _log("alpr_engine.py:read_plate_text:5", "No OCR results", {}, "M")
+            # #endregion
             return None
         
         # Get result with highest confidence
         best_result = max(results, key=lambda x: x[2])
         text = best_result[1]
         confidence = best_result[2]
+        # #region agent log
+        _log("alpr_engine.py:read_plate_text:6", "Best OCR result", {"raw_text": text, "confidence": confidence}, "M")
+        # #endregion
         
         # Clean and format text
         text = self._clean_plate_text(text)
+        # #region agent log
+        _log("alpr_engine.py:read_plate_text:7", "After cleaning", {"cleaned_text": text, "min_confidence": self.ocr_config['confidence']}, "M")
+        # #endregion
         
         if confidence < self.ocr_config['confidence']:
+            # #region agent log
+            _log("alpr_engine.py:read_plate_text:8", "Confidence too low, rejecting", {"confidence": confidence, "threshold": self.ocr_config['confidence']}, "M")
+            # #endregion
             return None
         
         return text, confidence
@@ -152,22 +230,45 @@ class ALPREngine:
         Complete ALPR pipeline: detect plate and read text
         Returns: dict with plate info or None
         """
+        # #region agent log
+        _log("alpr_engine.py:process_frame:1", "process_frame() called", {"frame_shape": frame.shape if frame is not None else None}, "M")
+        # #endregion
+        
         # Detect plate
         detection = self.detect_plate(frame)
+        # #region agent log
+        _log("alpr_engine.py:process_frame:2", "After detect_plate()", {"detection_is_none": detection is None}, "M")
+        # #endregion
         if detection is None:
             return None
         
         plate_img, det_confidence = detection
+        # #region agent log
+        _log("alpr_engine.py:process_frame:3", "Plate detected", {"det_confidence": det_confidence, "plate_img_shape": plate_img.shape if plate_img is not None else None}, "M")
+        # #endregion
         
         # Read text
+        # #region agent log
+        _log("alpr_engine.py:process_frame:4", "Before read_plate_text()", {}, "M")
+        # #endregion
         ocr_result = self.read_plate_text(plate_img)
+        # #region agent log
+        _log("alpr_engine.py:process_frame:5", "After read_plate_text()", {"ocr_result_is_none": ocr_result is None}, "M")
+        # #endregion
         if ocr_result is None:
             return None
         
         plate_text, ocr_confidence = ocr_result
+        # #region agent log
+        _log("alpr_engine.py:process_frame:6", "OCR succeeded", {"plate_text": plate_text, "ocr_confidence": ocr_confidence}, "M")
+        # #endregion
         
         # Combined confidence
         combined_confidence = (det_confidence + ocr_confidence) / 2
+        
+        # #region agent log
+        _log("alpr_engine.py:process_frame:7", "Returning result", {"plate_number": plate_text, "combined_confidence": combined_confidence}, "M")
+        # #endregion
         
         return {
             'plate_number': plate_text,

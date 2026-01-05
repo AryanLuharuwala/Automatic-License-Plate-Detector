@@ -4,7 +4,7 @@
     "port": 5432,
     "database": "alpr_tollplaza",
     "user": "postgres",
-    "password": "your_password"
+    "password": "0852"
   },
   "camera": {
     "source": 0,

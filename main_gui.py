@@ -1,18 +1,103 @@
 import sys
 import json
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QTabWidget,
                              QTableWidget, QTableWidgetItem, QLineEdit, 
-                             QComboBox, QTextEdit, QMessageBox, QHeaderView)
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread
-from PyQt5.QtGui import QImage, QPixmap, QFont
+                             QComboBox, QTextEdit, QMessageBox, QHeaderView,
+                             QFrame, QGroupBox, QScrollArea, QStackedWidget,
+                             QSizePolicy, QSpacerItem)
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread, QSize
+from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QIcon
 import cv2
 import numpy as np
 from datetime import datetime
+import os
 
 from database import DatabaseManager
 from camera_handler import CameraHandler
 from alpr_engine import ALPREngine
+
+# #region agent log
+LOG_PATH = r"c:\Users\maazs\Documents\Projects\ALPR_TollPlaza_System\.cursor\debug.log"
+def _log(location, message, data=None, hypothesisId=None):
+    try:
+        import json as _json
+        log_entry = {"sessionId": "debug-session", "runId": "run1", "location": location, "message": message, "data": data or {}, "timestamp": int(__import__("time").time() * 1000)}
+        if hypothesisId: log_entry["hypothesisId"] = hypothesisId
+        with open(LOG_PATH, "a", encoding="utf-8") as f: f.write(_json.dumps(log_entry) + "\n")
+    except: pass
+# #endregion
+
+class CameraInitThread(QThread):
+    """Thread for initializing camera in background"""
+    initialization_complete = pyqtSignal(object)  # Emits the CameraHandler object or None
+    initialization_status = pyqtSignal(str)  # Emits status messages
+    
+    def run(self):
+        # #region agent log
+        _log("main_gui.py:CameraInitThread:1", "CameraInitThread.run() started", {}, "J")
+        # #endregion
+        try:
+            self.initialization_status.emit("Initializing camera...")
+            # #region agent log
+            _log("main_gui.py:CameraInitThread:2", "Before importing CameraHandler", {}, "J")
+            # #endregion
+            from camera_handler import CameraHandler
+            # #region agent log
+            _log("main_gui.py:CameraInitThread:3", "Before creating CameraHandler()", {}, "J")
+            # #endregion
+            camera = CameraHandler()
+            # #region agent log
+            _log("main_gui.py:CameraInitThread:4", "After creating CameraHandler()", {"camera_available": camera.camera_available if camera else False}, "J")
+            # #endregion
+            if camera.camera_available:
+                # #region agent log
+                _log("main_gui.py:CameraInitThread:5", "Before camera.start()", {}, "J")
+                # #endregion
+                camera.start()
+                # #region agent log
+                _log("main_gui.py:CameraInitThread:6", "After camera.start()", {}, "J")
+                # #endregion
+                self.initialization_status.emit("Camera initialized successfully!")
+            else:
+                # #region agent log
+                _log("main_gui.py:CameraInitThread:7", "Camera not available", {}, "J")
+                # #endregion
+                self.initialization_status.emit("Camera not available")
+            # #region agent log
+            _log("main_gui.py:CameraInitThread:8", "Before emitting initialization_complete", {"camera_is_none": camera is None}, "J")
+            # #endregion
+            self.initialization_complete.emit(camera)
+            # #region agent log
+            _log("main_gui.py:CameraInitThread:9", "After emitting initialization_complete", {}, "J")
+            # #endregion
+        except Exception as e:
+            # #region agent log
+            _log("main_gui.py:CameraInitThread:10", "Camera initialization exception in thread", {"error": str(e), "error_type": type(e).__name__}, "K")
+            # #endregion
+            self.initialization_status.emit(f"Camera initialization failed: {e}")
+            self.initialization_complete.emit(None)
+
+
+class ALPRInitThread(QThread):
+    """Thread for initializing ALPR engine in background"""
+    initialization_complete = pyqtSignal(object)  # Emits the ALPREngine object or None
+    initialization_status = pyqtSignal(str)  # Emits status messages
+    
+    def run(self):
+        try:
+            self.initialization_status.emit("Loading ALPR Engine...")
+            from alpr_engine import ALPREngine
+            alpr_engine = ALPREngine()
+            self.initialization_status.emit("ALPR Engine loaded successfully!")
+            self.initialization_complete.emit(alpr_engine)
+        except Exception as e:
+            self.initialization_status.emit(f"ALPR Engine failed: {e}")
+            self.initialization_complete.emit(None)
+
 
 class DetectionThread(QThread):
     """Thread for continuous plate detection"""
@@ -26,320 +111,1121 @@ class DetectionThread(QThread):
     
     def run(self):
         self.running = True
+        print("\n" + "="*60)
+        print("🔍 DETECTION THREAD STARTED")
+        print("="*60 + "\n")
+        
         while self.running:
-            ret, frame = self.camera.read()
-            if ret:
-                result = self.alpr_engine.process_frame(frame)
-                if result:
-                    self.detection_result.emit(result)
-            self.msleep(100)  # Check every 100ms
+            if self.camera and self.camera.camera_available and self.alpr_engine:
+                ret, frame = self.camera.read()
+                if ret and frame is not None:
+                    try:
+                        # #region agent log
+                        _log("main_gui.py:DetectionThread:1", "Before process_frame()", {"frame_shape": frame.shape if frame is not None else None}, "M")
+                        # #endregion
+                        result = self.alpr_engine.process_frame(frame)
+                        # #region agent log
+                        _log("main_gui.py:DetectionThread:2", "After process_frame()", {"result_is_none": result is None, "result_keys": list(result.keys()) if result else None}, "M")
+                        # #endregion
+                        if result:
+                            print("\n" + "🎯 "*20)
+                            print(f"🎯 PLATE DETECTED: {result.get('plate_number')} (Confidence: {result.get('confidence'):.2%})")
+                            print("🎯 "*20 + "\n")
+                            print(f"📤 EMITTING DETECTION SIGNAL...")
+                            # #region agent log
+                            _log("main_gui.py:DetectionThread:3", "Before emitting detection_result", {"plate_number": result.get('plate_number'), "confidence": result.get('confidence')}, "N")
+                            # #endregion
+                            self.detection_result.emit(result)
+                            print(f"✅ SIGNAL EMITTED SUCCESSFULLY\n")
+                            # #region agent log
+                            _log("main_gui.py:DetectionThread:4", "After emitting detection_result", {}, "N")
+                            # #endregion
+                    except Exception as e:
+                        print(f"\n❌ ERROR IN DETECTION THREAD: {e}")
+                        print(f"   Error type: {type(e).__name__}\n")
+                        # #region agent log
+                        _log("main_gui.py:DetectionThread:5", "Exception in detection thread", {"error": str(e), "error_type": type(e).__name__}, "P")
+                        # #endregion
+            self.msleep(100)
     
     def stop(self):
         self.running = False
 
 
+class MetricCard(QFrame):
+    """Modern metric card widget"""
+    def __init__(self, title, value, subtitle="", icon="", parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
+        self.setLayout(layout)
+        
+        # Title
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #6b7280; font-size: 14px; font-weight: 500;")
+        layout.addWidget(title_label)
+        
+        # Value (store reference for updates)
+        self.value_label = QLabel(str(value))
+        self.value_label.setStyleSheet("color: #111827; font-size: 32px; font-weight: 700;")
+        layout.addWidget(self.value_label)
+        
+        # Subtitle
+        if subtitle:
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setStyleSheet("color: #9ca3af; font-size: 12px;")
+            layout.addWidget(subtitle_label)
+    
+    def set_value(self, value):
+        """Update the metric value"""
+        self.value_label.setText(str(value))
+
+
+class SidebarButton(QPushButton):
+    """Sidebar navigation button"""
+    def __init__(self, text, icon="", parent=None):
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #6b7280;
+                text-align: left;
+                padding: 12px 20px;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: 500;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #f3f4f6;
+                color: #111827;
+            }
+            QPushButton:checked {
+                background-color: #3b82f6;
+                color: #ffffff;
+            }
+        """)
+        self.setMinimumHeight(44)
+
+
 class ALPRMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # #region agent log
+        _log("main_gui.py:__init__:1", "ALPRMainWindow.__init__ started", {}, "D")
+        # #endregion
         self.setWindowTitle("ALPR Toll Plaza System")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setGeometry(100, 50, 1920, 1080)
+        self.setMinimumSize(1400, 800)
         
         # Load configuration
-        with open('config.json', 'r') as f:
-            self.config = json.load(f)
-        
-        # Initialize components
+        # #region agent log
+        _log("main_gui.py:48", "Loading config file", {"config_path": "config.json"}, "A")
+        # #endregion
         try:
-            self.db = DatabaseManager()
-            self.camera = CameraHandler()
-            self.alpr_engine = ALPREngine()
-            
-            self.camera.start()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Initialization Error", str(e))
+            with open('config.json', 'r') as f:
+                self.config = json.load(f)
+            # #region agent log
+            _log("main_gui.py:49", "Config loaded successfully", {"has_database": "database" in self.config, "has_camera": "camera" in self.config, "has_yolo": "yolo" in self.config, "has_ocr": "ocr" in self.config, "has_node": "node" in self.config}, "B")
+            # #endregion
+        except FileNotFoundError as e:
+            # #region agent log
+            _log("main_gui.py:48", "Config file not found", {"error": str(e)}, "A")
+            # #endregion
+            QMessageBox.critical(self, "Config Error", f"Config file not found: {e}")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            # #region agent log
+            _log("main_gui.py:48", "Config JSON decode error", {"error": str(e)}, "A")
+            # #endregion
+            QMessageBox.critical(self, "Config Error", f"Invalid JSON in config file: {e}")
+            sys.exit(1)
+        except KeyError as e:
+            # #region agent log
+            _log("main_gui.py:48", "Missing config key", {"error": str(e), "config_keys": list(self.config.keys())}, "B")
+            # #endregion
+            QMessageBox.critical(self, "Config Error", f"Missing required config key: {e}")
             sys.exit(1)
         
-        # Detection thread
-        self.detection_thread = DetectionThread(self.camera, self.alpr_engine)
-        self.detection_thread.detection_result.connect(self.handle_detection)
+        # Initialize components
+        self.db = None
+        self.camera = None
+        self.alpr_engine = None
+        self.camera_loading = False
+        self.alpr_loading = False
+        self.detection_thread = None
+        
+        # Initialize database (required)
+        try:
+            self.db = DatabaseManager()
+        except Exception as e:
+            QMessageBox.critical(self, "Database Error", f"Failed to initialize database: {e}")
+            sys.exit(1)
+        
+        # Camera and ALPR will be initialized in background after GUI is shown
+        # #region agent log
+        _log("main_gui.py:__init__:2", "Skipping camera initialization (will do in background)", {}, "A")
+        # #endregion
         
         # UI state
         self.current_detection = None
+        self.stats = {'total_vehicles': 0, 'allowed_today': 0, 'denied_today': 0, 'total_detections': 0}
         
+        # #region agent log
+        _log("main_gui.py:__init__:7", "Before init_ui()", {}, "C")
+        # #endregion
         self.init_ui()
+        # #region agent log
+        _log("main_gui.py:__init__:8", "After init_ui()", {}, "C")
+        # #endregion
         
-        # Start video timer
-        self.video_timer = QTimer()
-        self.video_timer.timeout.connect(self.update_video)
-        self.video_timer.start(30)  # 30ms = ~33fps
+        # Video timer will be started after camera initializes
+        self.video_timer = None
+        if hasattr(self, 'video_label'):
+            self.video_label.setText("⏳ Initializing Camera...")
+            self.video_label.setStyleSheet("""
+                background-color: #f9fafb;
+                border: 2px dashed #d1d5db;
+                border-radius: 12px;
+                color: #f59e0b;
+                font-size: 18px;
+                font-weight: 500;
+            """)
         
-        # Start detection
-        self.detection_thread.start()
+        # Update stats
+        # #region agent log
+        _log("main_gui.py:__init__:9", "Before update_stats()", {}, "E")
+        # #endregion
+        self.update_stats()
+        # #region agent log
+        _log("main_gui.py:__init__:10", "After update_stats()", {}, "E")
+        # #endregion
+        
+        # Initialize camera and ALPR in background after GUI is shown
+        QTimer.singleShot(100, self.init_camera_background)
+        
+        # #region agent log
+        _log("main_gui.py:__init__:11", "ALPRMainWindow.__init__ completed", {}, "D")
+        # #endregion
     
     def init_ui(self):
-        """Initialize UI components"""
+        """Initialize UI with Finance SaaS dashboard style"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        central_widget.setStyleSheet("background-color: #f9fafb;")
         
         main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         central_widget.setLayout(main_layout)
         
-        # Left panel - Video feed
-        left_panel = self.create_video_panel()
-        main_layout.addWidget(left_panel, 2)
+        # Sidebar
+        sidebar = self.create_sidebar()
+        main_layout.addWidget(sidebar)
         
-        # Right panel - Tabs
-        right_panel = self.create_tabs_panel()
-        main_layout.addWidget(right_panel, 1)
+        # Main content area
+        content_area = QWidget()
+        content_area.setStyleSheet("background-color: #f9fafb;")
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_area.setLayout(content_layout)
+        
+        # Header
+        header = self.create_header()
+        content_layout.addWidget(header)
+        
+        # Stacked widget for pages
+        self.stacked_widget = QStackedWidget()
+        content_layout.addWidget(self.stacked_widget)
+        
+        # Create pages
+        self.dashboard_page = self.create_dashboard_page()
+        self.vehicles_page = self.create_vehicles_page()
+        self.history_page = self.create_history_page()
+        self.settings_page = self.create_settings_page()
+        
+        self.stacked_widget.addWidget(self.dashboard_page)
+        self.stacked_widget.addWidget(self.vehicles_page)
+        self.stacked_widget.addWidget(self.history_page)
+        self.stacked_widget.addWidget(self.settings_page)
+        
+        main_layout.addWidget(content_area, 1)
     
-    def create_video_panel(self):
-        """Create video feed panel"""
-        panel = QWidget()
-        layout = QVBoxLayout()
-        panel.setLayout(layout)
-        
-        # Video label
-        self.video_label = QLabel()
-        self.video_label.setMinimumSize(800, 600)
-        self.video_label.setStyleSheet("background-color: black; border: 2px solid #333;")
-        self.video_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.video_label)
-        
-        # Status panel
-        status_layout = QHBoxLayout()
-        
-        # Detected plate
-        self.plate_label = QLabel("NO DETECTION")
-        self.plate_label.setFont(QFont('Arial', 24, QFont.Bold))
-        self.plate_label.setAlignment(Qt.AlignCenter)
-        self.plate_label.setStyleSheet("background-color: #333; color: white; padding: 20px; border-radius: 10px;")
-        status_layout.addWidget(self.plate_label)
-        
-        # Status indicator
-        self.status_label = QLabel("WAITING")
-        self.status_label.setFont(QFont('Arial', 20, QFont.Bold))
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("background-color: gray; color: white; padding: 20px; border-radius: 10px;")
-        status_layout.addWidget(self.status_label)
-        
-        layout.addLayout(status_layout)
-        
-        # Vehicle info panel
-        self.info_text = QTextEdit()
-        self.info_text.setReadOnly(True)
-        self.info_text.setMaximumHeight(150)
-        self.info_text.setStyleSheet("background-color: #2a2a2a; color: white; border: 1px solid #333; padding: 10px;")
-        layout.addWidget(self.info_text)
-        
-        return panel
-    
-    def create_tabs_panel(self):
-        """Create tabs panel"""
-        tabs = QTabWidget()
-        tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #333; background: #2a2a2a; }
-            QTabBar::tab { background: #333; color: white; padding: 10px; }
-            QTabBar::tab:selected { background: #0066cc; }
+    def create_sidebar(self):
+        """Create modern sidebar navigation"""
+        sidebar = QFrame()
+        sidebar.setFrameShape(QFrame.StyledPanel)
+        sidebar.setFixedWidth(260)
+        sidebar.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-right: 1px solid #e5e7eb;
+            }
         """)
         
-        # Admin tab
-        admin_tab = self.create_admin_tab()
-        tabs.addTab(admin_tab, "Admin Panel")
-        
-        # History tab
-        history_tab = self.create_history_tab()
-        tabs.addTab(history_tab, "History")
-        
-        # Settings tab
-        settings_tab = self.create_settings_tab()
-        tabs.addTab(settings_tab, "Settings")
-        
-        return tabs
-    
-    def create_admin_tab(self):
-        """Create admin panel tab"""
-        widget = QWidget()
         layout = QVBoxLayout()
-        widget.setLayout(layout)
+        layout.setContentsMargins(20, 30, 20, 30)
+        layout.setSpacing(0)
+        sidebar.setLayout(layout)
+        
+        # Logo/Title
+        logo = QLabel("🚗 ALPR System")
+        logo.setStyleSheet("""
+            color: #111827;
+            font-size: 24px;
+            font-weight: 700;
+            padding-bottom: 30px;
+        """)
+        layout.addWidget(logo)
+        
+        # Navigation buttons
+        nav_layout = QVBoxLayout()
+        nav_layout.setSpacing(8)
+        
+        self.dashboard_btn = SidebarButton("📊 Dashboard")
+        self.dashboard_btn.setChecked(True)
+        self.dashboard_btn.clicked.connect(lambda: self.switch_page(0))
+        nav_layout.addWidget(self.dashboard_btn)
+        
+        self.vehicles_btn = SidebarButton("🚗 Vehicles")
+        self.vehicles_btn.clicked.connect(lambda: self.switch_page(1))
+        nav_layout.addWidget(self.vehicles_btn)
+        
+        self.history_btn = SidebarButton("📜 History")
+        self.history_btn.clicked.connect(lambda: self.switch_page(2))
+        nav_layout.addWidget(self.history_btn)
+        
+        self.settings_btn = SidebarButton("⚙️ Settings")
+        self.settings_btn.clicked.connect(lambda: self.switch_page(3))
+        nav_layout.addWidget(self.settings_btn)
+        
+        layout.addLayout(nav_layout)
+        layout.addStretch()
+        
+        # Footer
+        footer = QLabel(f"Node: {self.config.get('node', {}).get('node_id', 'N/A')}")
+        footer.setStyleSheet("color: #9ca3af; font-size: 12px; padding-top: 20px;")
+        layout.addWidget(footer)
+        
+        return sidebar
+    
+    def create_header(self):
+        """Create top header bar"""
+        header = QFrame()
+        header.setFrameShape(QFrame.StyledPanel)
+        header.setFixedHeight(70)
+        header.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-bottom: 1px solid #e5e7eb;
+            }
+        """)
+        
+        layout = QHBoxLayout()
+        layout.setContentsMargins(30, 0, 30, 0)
+        header.setLayout(layout)
+        
+        # Title (will be updated based on page)
+        self.header_title = QLabel("Dashboard")
+        self.header_title.setStyleSheet("color: #111827; font-size: 24px; font-weight: 700;")
+        layout.addWidget(self.header_title)
+        
+        layout.addStretch()
+        
+        # Status indicator
+        status = QLabel("● Active")
+        status.setStyleSheet("color: #10b981; font-size: 14px; font-weight: 500;")
+        layout.addWidget(status)
+        
+        return header
+    
+    def switch_page(self, index):
+        """Switch between pages"""
+        # Update button states
+        self.dashboard_btn.setChecked(index == 0)
+        self.vehicles_btn.setChecked(index == 1)
+        self.history_btn.setChecked(index == 2)
+        self.settings_btn.setChecked(index == 3)
+        
+        # Update header title
+        titles = ["Dashboard", "Vehicles", "History", "Settings"]
+        self.header_title.setText(titles[index])
+        
+        # Switch page
+        self.stacked_widget.setCurrentIndex(index)
+        
+        # Refresh data if needed
+        if index == 1:
+            self.refresh_vehicles()
+        elif index == 2:
+            self.refresh_history()
+        elif index == 0:
+            self.update_stats()
+    
+    def create_dashboard_page(self):
+        """Create dashboard page with metrics and video"""
+        page = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(24)
+        page.setLayout(layout)
+        
+        # Metrics row
+        metrics_layout = QHBoxLayout()
+        metrics_layout.setSpacing(20)
+        
+        self.total_vehicles_card = MetricCard("Total Vehicles", "0", "Registered in system")
+        metrics_layout.addWidget(self.total_vehicles_card)
+        
+        self.allowed_card = MetricCard("Allowed Today", "0", "Authorized entries")
+        metrics_layout.addWidget(self.allowed_card)
+        
+        self.denied_card = MetricCard("Denied Today", "0", "Unauthorized attempts")
+        metrics_layout.addWidget(self.denied_card)
+        
+        self.detections_card = MetricCard("Total Detections", "0", "All time")
+        metrics_layout.addWidget(self.detections_card)
+        
+        layout.addLayout(metrics_layout)
+        
+        # Video and status row
+        video_row = QHBoxLayout()
+        video_row.setSpacing(20)
+        
+        # Video feed card
+        video_card = QFrame()
+        video_card.setFrameShape(QFrame.StyledPanel)
+        video_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        video_layout = QVBoxLayout()
+        video_layout.setContentsMargins(20, 20, 20, 20)
+        video_card.setLayout(video_layout)
+        
+        video_title = QLabel("Live Camera Feed")
+        video_title.setStyleSheet("color: #111827; font-size: 18px; font-weight: 600; padding-bottom: 15px;")
+        video_layout.addWidget(video_title)
+        
+        self.video_label = QLabel()
+        self.video_label.setMinimumSize(640, 360)
+        self.video_label.setMaximumSize(640, 360)
+        self.video_label.setStyleSheet("""
+            QLabel {
+                background-color: #000000;
+                border-radius: 8px;
+            }
+        """)
+        self.video_label.setAlignment(Qt.AlignCenter)
+        video_layout.addWidget(self.video_label)
+        
+        # Status cards
+        status_layout = QVBoxLayout()
+        status_layout.setSpacing(15)
+        
+        # Plate display
+        plate_card = QFrame()
+        plate_card.setFrameShape(QFrame.StyledPanel)
+        plate_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        plate_layout = QVBoxLayout()
+        plate_layout.setContentsMargins(20, 20, 20, 20)
+        plate_card.setLayout(plate_layout)
+        
+        plate_title = QLabel("Detected Plate")
+        plate_title.setStyleSheet("color: #6b7280; font-size: 14px; font-weight: 500;")
+        plate_layout.addWidget(plate_title)
+        
+        self.plate_label = QLabel("NO DETECTION")
+        self.plate_label.setStyleSheet("color: #111827; font-size: 32px; font-weight: 700;")
+        plate_layout.addWidget(self.plate_label)
+        status_layout.addWidget(plate_card)
+        
+        # Status display
+        status_card = QFrame()
+        status_card.setFrameShape(QFrame.StyledPanel)
+        status_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        status_card_layout = QVBoxLayout()
+        status_card_layout.setContentsMargins(20, 20, 20, 20)
+        status_card.setLayout(status_card_layout)
+        
+        status_title = QLabel("Status")
+        status_title.setStyleSheet("color: #6b7280; font-size: 14px; font-weight: 500;")
+        status_card_layout.addWidget(status_title)
+        
+        self.status_label = QLabel("WAITING")
+        self.status_label.setStyleSheet("color: #6b7280; font-size: 24px; font-weight: 600;")
+        status_card_layout.addWidget(self.status_label)
+        status_layout.addWidget(status_card)
+        
+        # Vehicle info
+        info_card = QFrame()
+        info_card.setFrameShape(QFrame.StyledPanel)
+        info_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        info_layout = QVBoxLayout()
+        info_layout.setContentsMargins(20, 20, 20, 20)
+        info_card.setLayout(info_layout)
+        
+        info_title = QLabel("Vehicle Information")
+        info_title.setStyleSheet("color: #6b7280; font-size: 14px; font-weight: 500; padding-bottom: 10px;")
+        info_layout.addWidget(info_title)
+        
+        self.info_text = QTextEdit()
+        self.info_text.setReadOnly(True)
+        self.info_text.setMaximumHeight(120)
+        self.info_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f9fafb;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                padding: 10px;
+                color: #111827;
+                font-size: 13px;
+            }
+        """)
+        info_layout.addWidget(self.info_text)
+        status_layout.addWidget(info_card)
+        
+        video_row.addWidget(video_card)
+        video_row.addLayout(status_layout)
+        
+        layout.addLayout(video_row)
+        layout.addStretch()
+        
+        return page
+    
+    def create_vehicles_page(self):
+        """Create vehicles management page"""
+        page = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(24)
+        page.setLayout(layout)
         
         # Add vehicle form
+        form_card = QFrame()
+        form_card.setFrameShape(QFrame.StyledPanel)
+        form_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
         form_layout = QVBoxLayout()
+        form_layout.setContentsMargins(24, 24, 24, 24)
+        form_card.setLayout(form_layout)
         
+        form_title = QLabel("Add New Vehicle")
+        form_title.setStyleSheet("color: #111827; font-size: 20px; font-weight: 600; padding-bottom: 20px;")
+        form_layout.addWidget(form_title)
+        
+        # Form fields in grid
+        fields_layout = QHBoxLayout()
+        fields_layout.setSpacing(15)
+        
+        # Plate
+        plate_group = QVBoxLayout()
+        plate_label = QLabel("License Plate")
+        plate_label.setStyleSheet("color: #374151; font-size: 14px; font-weight: 500; padding-bottom: 8px;")
+        plate_group.addWidget(plate_label)
         self.plate_input = QLineEdit()
-        self.plate_input.setPlaceholderText("Plate Number (e.g., WB-01-AB-1234)")
-        form_layout.addWidget(QLabel("Plate Number:"))
-        form_layout.addWidget(self.plate_input)
+        self.plate_input.setPlaceholderText("WB-01-AB-1234")
+        self.plate_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border: 2px solid #3b82f6;
+            }
+        """)
+        plate_group.addWidget(self.plate_input)
+        fields_layout.addLayout(plate_group)
         
+        # Owner
+        owner_group = QVBoxLayout()
+        owner_label = QLabel("Owner Name")
+        owner_label.setStyleSheet("color: #374151; font-size: 14px; font-weight: 500; padding-bottom: 8px;")
+        owner_group.addWidget(owner_label)
         self.owner_input = QLineEdit()
-        self.owner_input.setPlaceholderText("Owner Name")
-        form_layout.addWidget(QLabel("Owner Name:"))
-        form_layout.addWidget(self.owner_input)
+        self.owner_input.setPlaceholderText("Full name")
+        self.owner_input.setStyleSheet(self.plate_input.styleSheet())
+        owner_group.addWidget(self.owner_input)
+        fields_layout.addLayout(owner_group)
         
+        # Type
+        type_group = QVBoxLayout()
+        type_label = QLabel("Vehicle Type")
+        type_label.setStyleSheet("color: #374151; font-size: 14px; font-weight: 500; padding-bottom: 8px;")
+        type_group.addWidget(type_label)
         self.type_input = QComboBox()
         self.type_input.addItems(['Car', 'SUV', 'Truck', 'Bus', 'Motorcycle'])
-        form_layout.addWidget(QLabel("Vehicle Type:"))
-        form_layout.addWidget(self.type_input)
+        self.type_input.setStyleSheet("""
+            QComboBox {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 14px;
+            }
+            QComboBox:focus {
+                border: 2px solid #3b82f6;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #ffffff;
+                border: 1px solid #d1d5db;
+                selection-background-color: #3b82f6;
+            }
+        """)
+        type_group.addWidget(self.type_input)
+        fields_layout.addLayout(type_group)
         
+        # Contact
+        contact_group = QVBoxLayout()
+        contact_label = QLabel("Contact")
+        contact_label.setStyleSheet("color: #374151; font-size: 14px; font-weight: 500; padding-bottom: 8px;")
+        contact_group.addWidget(contact_label)
         self.contact_input = QLineEdit()
-        self.contact_input.setPlaceholderText("Contact Number")
-        form_layout.addWidget(QLabel("Contact:"))
-        form_layout.addWidget(self.contact_input)
+        self.contact_input.setPlaceholderText("Phone number")
+        self.contact_input.setStyleSheet(self.plate_input.styleSheet())
+        contact_group.addWidget(self.contact_input)
+        fields_layout.addLayout(contact_group)
         
+        form_layout.addLayout(fields_layout)
+        
+        # Add button
         add_btn = QPushButton("Add Vehicle")
         add_btn.clicked.connect(self.add_vehicle)
-        add_btn.setStyleSheet("background-color: #0066cc; color: white; padding: 10px; font-weight: bold;")
-        form_layout.addWidget(add_btn)
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 12px 24px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+            }
+            QPushButton:pressed {
+                background-color: #1d4ed8;
+            }
+        """)
+        add_btn.setMaximumWidth(200)
+        form_layout.addWidget(add_btn, alignment=Qt.AlignLeft)
         
-        layout.addLayout(form_layout)
+        layout.addWidget(form_card)
         
-        # Vehicle table
+        # Vehicles table
+        table_card = QFrame()
+        table_card.setFrameShape(QFrame.StyledPanel)
+        table_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        table_layout = QVBoxLayout()
+        table_layout.setContentsMargins(24, 24, 24, 24)
+        table_card.setLayout(table_layout)
+        
+        table_title = QLabel("Registered Vehicles")
+        table_title.setStyleSheet("color: #111827; font-size: 20px; font-weight: 600; padding-bottom: 20px;")
+        table_layout.addWidget(table_title)
+        
         self.vehicle_table = QTableWidget()
         self.vehicle_table.setColumnCount(5)
         self.vehicle_table.setHorizontalHeaderLabels(['Plate', 'Owner', 'Type', 'Contact', 'Actions'])
         self.vehicle_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(self.vehicle_table)
+        self.vehicle_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                gridline-color: #e5e7eb;
+            }
+            QTableWidget::item {
+                padding: 12px;
+                border-bottom: 1px solid #f3f4f6;
+            }
+            QTableWidget::item:selected {
+                background-color: #eff6ff;
+            }
+            QHeaderView::section {
+                background-color: #f9fafb;
+                color: #374151;
+                padding: 12px;
+                border: none;
+                border-bottom: 2px solid #e5e7eb;
+                font-weight: 600;
+            }
+        """)
+        table_layout.addWidget(self.vehicle_table)
         
-        # Refresh button
-        refresh_btn = QPushButton("Refresh List")
-        refresh_btn.clicked.connect(self.refresh_vehicles)
-        layout.addWidget(refresh_btn)
+        layout.addWidget(table_card)
         
-        self.refresh_vehicles()
-        
-        return widget
+        return page
     
-    def create_history_tab(self):
-        """Create history tab"""
-        widget = QWidget()
+    def create_history_page(self):
+        """Create history page"""
+        page = QWidget()
         layout = QVBoxLayout()
-        widget.setLayout(layout)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(24)
+        page.setLayout(layout)
+        
+        # History table card
+        table_card = QFrame()
+        table_card.setFrameShape(QFrame.StyledPanel)
+        table_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        table_layout = QVBoxLayout()
+        table_layout.setContentsMargins(24, 24, 24, 24)
+        table_card.setLayout(table_layout)
+        
+        title_layout = QHBoxLayout()
+        title = QLabel("Detection History")
+        title.setStyleSheet("color: #111827; font-size: 20px; font-weight: 600;")
+        title_layout.addWidget(title)
+        title_layout.addStretch()
+        
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self.refresh_history)
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f3f4f6;
+                color: #374151;
+                border: 1px solid #d1d5db;
+                border-radius: 8px;
+                padding: 8px 16px;
+                font-size: 14px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #e5e7eb;
+            }
+        """)
+        title_layout.addWidget(refresh_btn)
+        table_layout.addLayout(title_layout)
         
         self.history_table = QTableWidget()
         self.history_table.setColumnCount(5)
         self.history_table.setHorizontalHeaderLabels(['Time', 'Node', 'Plate', 'Status', 'Owner'])
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(self.history_table)
+        self.history_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                gridline-color: #e5e7eb;
+            }
+            QTableWidget::item {
+                padding: 12px;
+                border-bottom: 1px solid #f3f4f6;
+            }
+            QTableWidget::item:selected {
+                background-color: #eff6ff;
+            }
+            QHeaderView::section {
+                background-color: #f9fafb;
+                color: #374151;
+                padding: 12px;
+                border: none;
+                border-bottom: 2px solid #e5e7eb;
+                font-weight: 600;
+            }
+        """)
+        table_layout.addWidget(self.history_table)
         
-        refresh_btn = QPushButton("Refresh History")
-        refresh_btn.clicked.connect(self.refresh_history)
-        layout.addWidget(refresh_btn)
+        layout.addWidget(table_card)
         
-        self.refresh_history()
-        
-        return widget
+        return page
     
-    def create_settings_tab(self):
-        """Create settings tab"""
-        widget = QWidget()
+    def create_settings_page(self):
+        """Create settings page"""
+        page = QWidget()
         layout = QVBoxLayout()
-        widget.setLayout(layout)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(24)
+        page.setLayout(layout)
+        
+        # Settings card
+        settings_card = QFrame()
+        settings_card.setFrameShape(QFrame.StyledPanel)
+        settings_card.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border-radius: 12px;
+                border: 1px solid #e5e7eb;
+            }
+        """)
+        settings_layout = QVBoxLayout()
+        settings_layout.setContentsMargins(24, 24, 24, 24)
+        settings_card.setLayout(settings_layout)
+        
+        title = QLabel("System Configuration")
+        title.setStyleSheet("color: #111827; font-size: 20px; font-weight: 600; padding-bottom: 20px;")
+        settings_layout.addWidget(title)
         
         info_text = QTextEdit()
         info_text.setReadOnly(True)
-        info_text.setHtml(f"""
-            <h2>System Information</h2>
-            <p><b>Node ID:</b> {self.config['node']['node_id']}</p>
-            <p><b>Location:</b> {self.config['node']['location']}</p>
-            <p><b>Database:</b> {self.config['database']['host']}:{self.config['database']['port']}</p>
-            <p><b>Camera:</b> {self.config['camera']['source']}</p>
-            <p><b>YOLO Model:</b> {self.config['yolo']['model_path']}</p>
-            <p><b>Device:</b> {self.config['yolo']['device']}</p>
-        """)
-        layout.addWidget(info_text)
+        # #region agent log
+        _log("main_gui.py:240", "Accessing config keys for settings", {"has_node": "node" in self.config, "has_database": "database" in self.config, "has_camera": "camera" in self.config, "has_yolo": "yolo" in self.config}, "B")
+        # #endregion
+        try:
+            node_id = self.config['node']['node_id']
+            location = self.config['node']['location']
+            db_host = self.config['database']['host']
+            db_port = self.config['database']['port']
+            camera_source = self.config['camera']['source']
+            model_path = self.config['yolo']['model_path']
+            device = self.config['yolo']['device']
+            camera_status = "✅ Connected" if (self.camera and self.camera.camera_available) else "❌ Not Available"
+        except KeyError as e:
+            # #region agent log
+            _log("main_gui.py:240", "Missing nested config key", {"error": str(e)}, "B")
+            # #endregion
+            node_id = "N/A"
+            location = "N/A"
+            db_host = "N/A"
+            db_port = "N/A"
+            camera_source = "N/A"
+            model_path = "N/A"
+            device = "N/A"
+            camera_status = "❌ Unknown"
         
-        return widget
+        info_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f9fafb;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                padding: 15px;
+                color: #111827;
+                font-size: 14px;
+            }
+        """)
+        info_text.setHtml(f"""
+            <div style='font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;'>
+                <table style='width: 100%; border-collapse: collapse;'>
+                    <tr style='border-bottom: 1px solid #e5e7eb;'>
+                        <td style='padding: 12px 0; color: #6b7280; font-weight: 500; width: 200px;'>Node ID</td>
+                        <td style='padding: 12px 0; color: #111827; font-weight: 500;'>{node_id}</td>
+                    </tr>
+                    <tr style='border-bottom: 1px solid #e5e7eb;'>
+                        <td style='padding: 12px 0; color: #6b7280; font-weight: 500;'>Location</td>
+                        <td style='padding: 12px 0; color: #111827; font-weight: 500;'>{location}</td>
+                    </tr>
+                    <tr style='border-bottom: 1px solid #e5e7eb;'>
+                        <td style='padding: 12px 0; color: #6b7280; font-weight: 500;'>Database</td>
+                        <td style='padding: 12px 0; color: #111827; font-weight: 500;'>{db_host}:{db_port}</td>
+                    </tr>
+                    <tr style='border-bottom: 1px solid #e5e7eb;'>
+                        <td style='padding: 12px 0; color: #6b7280; font-weight: 500;'>Camera</td>
+                        <td style='padding: 12px 0; color: #111827; font-weight: 500;'>{camera_source} - {camera_status}</td>
+                    </tr>
+                    <tr style='border-bottom: 1px solid #e5e7eb;'>
+                        <td style='padding: 12px 0; color: #6b7280; font-weight: 500;'>YOLO Model</td>
+                        <td style='padding: 12px 0; color: #111827; font-weight: 500;'>{model_path}</td>
+                    </tr>
+                    <tr>
+                        <td style='padding: 12px 0; color: #6b7280; font-weight: 500;'>Device</td>
+                        <td style='padding: 12px 0; color: #111827; font-weight: 500;'>{device.upper()}</td>
+                    </tr>
+                </table>
+            </div>
+        """)
+        settings_layout.addWidget(info_text)
+        
+        layout.addWidget(settings_card)
+        layout.addStretch()
+        
+        return page
+    
+    def update_stats(self):
+        """Update dashboard statistics"""
+        # #region agent log
+        _log("main_gui.py:update_stats:1", "update_stats() started", {}, "E")
+        # #endregion
+        try:
+            # #region agent log
+            _log("main_gui.py:update_stats:2", "Before db.get_all_vehicles()", {}, "E")
+            # #endregion
+            vehicles = self.db.get_all_vehicles()
+            # #region agent log
+            _log("main_gui.py:update_stats:3", "After db.get_all_vehicles(), before db.get_detection_history()", {"vehicle_count": len(vehicles)}, "E")
+            # #endregion
+            history = self.db.get_detection_history(1000)
+            
+            today = datetime.now().date()
+            allowed_today = sum(1 for h in history if h['status'] == 'ALLOWED' and h['detected_at'].date() == today)
+            denied_today = sum(1 for h in history if h['status'] == 'DENIED' and h['detected_at'].date() == today)
+            
+            self.stats['total_vehicles'] = len(vehicles)
+            self.stats['allowed_today'] = allowed_today
+            self.stats['denied_today'] = denied_today
+            self.stats['total_detections'] = len(history)
+            
+            # Update cards
+            if hasattr(self, 'total_vehicles_card'):
+                self.total_vehicles_card.set_value(self.stats['total_vehicles'])
+            if hasattr(self, 'allowed_card'):
+                self.allowed_card.set_value(self.stats['allowed_today'])
+            if hasattr(self, 'denied_card'):
+                self.denied_card.set_value(self.stats['denied_today'])
+            if hasattr(self, 'detections_card'):
+                self.detections_card.set_value(self.stats['total_detections'])
+            # #region agent log
+            _log("main_gui.py:update_stats:4", "update_stats() completed successfully", {}, "E")
+            # #endregion
+        except Exception as e:
+            # #region agent log
+            _log("main_gui.py:update_stats:5", "update_stats() exception", {"error": str(e)}, "E")
+            # #endregion
+            pass
     
     def update_video(self):
         """Update video feed"""
+        if not self.camera or not self.camera.camera_available:
+            return
+        
+        # #region agent log
+        _log("main_gui.py:255", "Reading camera frame", {"camera_exists": self.camera is not None}, "D")
+        # #endregion
         ret, frame = self.camera.read()
-        if ret:
-            # Convert frame to QImage
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_frame.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qt_image)
-            scaled_pixmap = pixmap.scaled(
-                self.video_label.size(), 
-                Qt.KeepAspectRatio, 
-                Qt.SmoothTransformation
-            )
-            self.video_label.setPixmap(scaled_pixmap)
+        # #region agent log
+        _log("main_gui.py:256", "Camera read result", {"ret": ret, "frame_is_none": frame is None, "frame_shape": frame.shape if frame is not None else None}, "D")
+        # #endregion
+        if ret and frame is not None:
+            try:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qt_image)
+                scaled_pixmap = pixmap.scaled(
+                    self.video_label.size(), 
+                    Qt.KeepAspectRatio, 
+                    Qt.SmoothTransformation
+                )
+                self.video_label.setPixmap(scaled_pixmap)
+            except Exception as e:
+                # #region agent log
+                _log("main_gui.py:268", "Error updating video", {"error": str(e)}, "D")
+                # #endregion
+                pass
     
     def handle_detection(self, result):
         """Handle detection result from thread"""
-        plate_number = result['plate_number']
-        confidence = result['confidence']
+        print("\n" + "🔔 "*20)
+        print("🔔 HANDLE_DETECTION CALLED!")
+        print("🔔 "*20)
         
-        # Update UI
-        self.plate_label.setText(plate_number)
+        # #region agent log
+        _log("main_gui.py:handle_detection:1", "handle_detection() called", {"result_keys": list(result.keys()), "plate_number": result.get('plate_number'), "confidence": result.get('confidence')}, "O")
+        # #endregion
         
-        # Check database
-        vehicle = self.db.get_vehicle(plate_number)
-        
-        if vehicle:
-            # Vehicle found - ALLOWED
-            self.status_label.setText("✓ ALLOWED")
-            self.status_label.setStyleSheet(
-                "background-color: green; color: white; padding: 20px; border-radius: 10px; font-weight: bold;"
-            )
+        try:
+            plate_number = result['plate_number']
+            confidence = result['confidence']
+            
+            print(f"📋 Plate Number: {plate_number}")
+            print(f"📊 Confidence: {confidence:.2%}")
+            
+            # #region agent log
+            _log("main_gui.py:handle_detection:2", "Before updating plate_label", {"plate_number": plate_number}, "O")
+            # #endregion
+            
+            print(f"🖼️  Updating plate label to: {plate_number}")
+            self.plate_label.setText(plate_number)
+            print(f"✅ Plate label updated")
+            
+            # #region agent log
+            _log("main_gui.py:handle_detection:3", "Before get_vehicle()", {"plate_number": plate_number}, "O")
+            # #endregion
+            
+            print(f"🔍 Checking database for vehicle: {plate_number}")
+            vehicle = self.db.get_vehicle(plate_number)
+            print(f"📦 Database result: {'FOUND' if vehicle else 'NOT FOUND'}")
+            
+            # #region agent log
+            _log("main_gui.py:handle_detection:4", "After get_vehicle()", {"vehicle_found": vehicle is not None}, "O")
+            # #endregion
+            
+            if vehicle:
+                print(f"\n✅ VEHICLE FOUND IN DATABASE!")
+                print(f"   Owner: {vehicle.get('owner_name', 'N/A')}")
+                print(f"   Type: {vehicle.get('vehicle_type', 'N/A')}")
+                
+                print(f"🟢 Setting status to ALLOWED")
+                self.status_label.setText("✓ ALLOWED")
+                self.status_label.setStyleSheet("color: #10b981; font-size: 24px; font-weight: 600;")
+                print(f"✅ Status label set to ALLOWED")
+                
+                info_html = f"""
+                    <div style='font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;'>
+                        <p style='color: #111827; margin: 4px 0;'><b>Owner:</b> {vehicle['owner_name']}</p>
+                        <p style='color: #111827; margin: 4px 0;'><b>Type:</b> {vehicle['vehicle_type']}</p>
+                        <p style='color: #111827; margin: 4px 0;'><b>Contact:</b> {vehicle['contact_number']}</p>
+                        <p style='color: #6b7280; margin: 4px 0;'><b>Confidence:</b> {confidence:.1%}</p>
+                    </div>
+                """
+                self.info_text.setHtml(info_html)
+                print(f"✅ Vehicle info displayed")
+                
+                try:
+                    print(f"💾 Logging ALLOWED detection to database...")
+                    self.db.log_detection(
+                        self.config['node']['node_id'],
+                        plate_number,
+                        confidence,
+                        'ALLOWED',
+                        vehicle['owner_name']
+                    )
+                    print(f"✅ Detection logged successfully")
+                except Exception as e:
+                    # #region agent log
+                    _log("main_gui.py:handle_detection:5", "Error logging ALLOWED detection", {"error": str(e)}, "O")
+                    # #endregion
+                    print(f"❌ Error logging detection: {e}")
+            else:
+                print(f"\n⛔ VEHICLE NOT FOUND IN DATABASE!")
+                
+                print(f"🔴 Setting status to DENIED")
+                self.status_label.setText("✗ DENIED")
+                self.status_label.setStyleSheet("color: #ef4444; font-size: 24px; font-weight: 600;")
+                print(f"✅ Status label set to DENIED")
+                
+                info_html = f"""
+                    <div style='font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;'>
+                        <p style='color: #111827; margin: 4px 0;'><b>Plate:</b> {plate_number}</p>
+                        <p style='color: #ef4444; margin: 4px 0;'><b>Status:</b> Not registered</p>
+                        <p style='color: #6b7280; margin: 4px 0;'><b>Confidence:</b> {confidence:.1%}</p>
+                    </div>
+                """
+                self.info_text.setHtml(info_html)
+                print(f"✅ Denial info displayed")
+                
+                try:
+                    print(f"💾 Logging DENIED detection to database...")
+                    self.db.log_detection(
+                        self.config['node']['node_id'],
+                        plate_number,
+                        confidence,
+                        'DENIED'
+                    )
+                    print(f"✅ Detection logged successfully")
+                except Exception as e:
+                    # #region agent log
+                    _log("main_gui.py:handle_detection:6", "Error logging DENIED detection", {"error": str(e)}, "O")
+                    # #endregion
+                    print(f"❌ Error logging detection: {e}")
+            
+            # Refresh UI (wrapped in try-except to not block status display)
+            try:
+                print(f"🔄 Refreshing UI (history and stats)...")
+                self.refresh_history()
+                self.update_stats()
+                print(f"✅ UI refreshed")
+            except Exception as e:
+                # #region agent log
+                _log("main_gui.py:handle_detection:7", "Error refreshing UI", {"error": str(e)}, "O")
+                # #endregion
+                print(f"❌ Error refreshing UI: {e}")
+            
+            print(f"⏰ Setting 5-second timer to reset display...")
+            QTimer.singleShot(5000, self.reset_display)
+            print(f"✅ Timer set")
+            
+            print("\n" + "="*60)
+            print("🎉 HANDLE_DETECTION COMPLETED SUCCESSFULLY!")
+            print("="*60 + "\n")
+            
+        except Exception as e:
+            # #region agent log
+            _log("main_gui.py:handle_detection:8", "Critical error in handle_detection", {"error": str(e), "error_type": type(e).__name__}, "O")
+            # #endregion
+            print("\n" + "❌"*20)
+            print(f"❌ CRITICAL ERROR IN HANDLE_DETECTION!")
+            print(f"❌ Error: {e}")
+            print(f"❌ Type: {type(e).__name__}")
+            print("❌"*20 + "\n")
+            
+            import traceback
+            print("Full traceback:")
+            traceback.print_exc()
+            
+            # Ensure status is updated even if there's an error
+            self.status_label.setText("⚠ ERROR")
+            self.status_label.setStyleSheet("color: #ef4444; font-size: 24px; font-weight: 600;")
             
             info_html = f"""
-                <h3 style='color: #00ff00;'>VEHICLE AUTHORIZED</h3>
-                <p><b>Owner:</b> {vehicle['owner_name']}</p>
-                <p><b>Type:</b> {vehicle['vehicle_type']}</p>
-                <p><b>Contact:</b> {vehicle['contact_number']}</p>
-                <p><b>Confidence:</b> {confidence:.2%}</p>
+                <div style='font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;'>
+                    <p style='color: #ef4444; margin: 4px 0;'><b>Error:</b> {str(e)}</p>
+                    <p style='color: #6b7280; margin: 4px 0; font-size: 12px;'>Check console for details</p>
+                </div>
             """
             self.info_text.setHtml(info_html)
             
-            # Log detection
-            self.db.log_detection(
-                self.config['node']['node_id'],
-                plate_number,
-                confidence,
-                'ALLOWED',
-                vehicle['owner_name']
-            )
-        else:
-            # Vehicle not found - DENIED
-            self.status_label.setText("✗ DENIED")
-            self.status_label.setStyleSheet(
-                "background-color: red; color: white; padding: 20px; border-radius: 10px; font-weight: bold;"
-            )
-            
-            info_html = f"""
-                <h3 style='color: #ff0000;'>VEHICLE NOT AUTHORIZED</h3>
-                <p><b>Plate:</b> {plate_number}</p>
-                <p><b>Status:</b> Not registered</p>
-                <p><b>Confidence:</b> {confidence:.2%}</p>
-                <p style='color: yellow;'>Please register at admin panel</p>
-            """
-            self.info_text.setHtml(info_html)
-            
-            # Log detection
-            self.db.log_detection(
-                self.config['node']['node_id'],
-                plate_number,
-                confidence,
-                'DENIED'
-            )
-        
-        # Refresh history
-        self.refresh_history()
-        
-        # Reset after 5 seconds
-        QTimer.singleShot(5000, self.reset_display)
+            QTimer.singleShot(5000, self.reset_display)
     
     def reset_display(self):
         """Reset display to waiting state"""
+        print("\n" + "⏱️ "*20)
+        print("⏱️  RESETTING DISPLAY TO WAITING STATE")
+        print("⏱️ "*20 + "\n")
+        
         self.plate_label.setText("NO DETECTION")
         self.status_label.setText("WAITING")
-        self.status_label.setStyleSheet(
-            "background-color: gray; color: white; padding: 20px; border-radius: 10px;"
-        )
+        self.status_label.setStyleSheet("color: #6b7280; font-size: 24px; font-weight: 600;")
         self.info_text.clear()
+        
+        print("✅ Display reset complete\n")
     
     def add_vehicle(self):
         """Add new vehicle to database"""
@@ -365,6 +1251,7 @@ class ALPRMainWindow(QMainWindow):
             self.owner_input.clear()
             self.contact_input.clear()
             self.refresh_vehicles()
+            self.update_stats()
         else:
             QMessageBox.warning(self, "Error", "Failed to add vehicle. Plate may already exist.")
     
@@ -381,7 +1268,20 @@ class ALPRMainWindow(QMainWindow):
             
             delete_btn = QPushButton("Delete")
             delete_btn.clicked.connect(lambda checked, p=vehicle['plate_number']: self.delete_vehicle(p))
-            delete_btn.setStyleSheet("background-color: #cc0000; color: white;")
+            delete_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ef4444;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 6px 12px;
+                    font-size: 12px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background-color: #dc2626;
+                }
+            """)
             self.vehicle_table.setCellWidget(i, 4, delete_btn)
     
     def delete_vehicle(self, plate_number):
@@ -395,6 +1295,7 @@ class ALPRMainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             self.db.delete_vehicle(plate_number)
             self.refresh_vehicles()
+            self.update_stats()
     
     def refresh_history(self):
         """Refresh detection history"""
@@ -409,39 +1310,257 @@ class ALPRMainWindow(QMainWindow):
             
             status_item = QTableWidgetItem(record['status'])
             if record['status'] == 'ALLOWED':
-                status_item.setBackground(Qt.green)
+                status_item.setForeground(QColor(16, 185, 129))
+                status_item.setBackground(QColor(209, 250, 229, 50))
             else:
-                status_item.setBackground(Qt.red)
+                status_item.setForeground(QColor(239, 68, 68))
+                status_item.setBackground(QColor(254, 226, 226, 50))
+            status_item.setFont(QFont('Segoe UI', 10, QFont.Bold))
             self.history_table.setItem(i, 3, status_item)
             
             self.history_table.setItem(i, 4, QTableWidgetItem(record['owner_name'] or 'Unknown'))
     
+    def init_camera_background(self):
+        """Initialize camera in background thread"""
+        if self.camera_loading:
+            return
+        
+        self.camera_loading = True
+        
+        # Show loading status
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("LOADING CAMERA...")
+            self.status_label.setStyleSheet("color: #f59e0b; font-size: 24px; font-weight: 600;")
+        
+        # Start initialization thread
+        self.camera_init_thread = CameraInitThread()
+        self.camera_init_thread.initialization_status.connect(self.on_camera_status)
+        self.camera_init_thread.initialization_complete.connect(self.on_camera_initialized)
+        self.camera_init_thread.start()
+        
+        # Set a timeout of 10 seconds for camera initialization
+        QTimer.singleShot(10000, self.on_camera_init_timeout)
+    
+    def on_camera_status(self, message):
+        """Handle camera initialization status updates"""
+        print(message)
+        if hasattr(self, 'video_label'):
+            self.video_label.setText(f"⏳ {message}")
+    
+    def on_camera_init_timeout(self):
+        """Handle camera initialization timeout"""
+        if not self.camera_loading:
+            return  # Already completed
+        
+        # #region agent log
+        _log("main_gui.py:on_camera_init_timeout", "Camera initialization timed out after 10 seconds", {"thread_is_running": self.camera_init_thread.isRunning() if hasattr(self, 'camera_init_thread') else False}, "J")
+        # #endregion
+        
+        print("⚠ Camera initialization timed out (10 seconds)")
+        self.camera_loading = False
+        
+        # Terminate the hung thread (forcefully)
+        if hasattr(self, 'camera_init_thread') and self.camera_init_thread.isRunning():
+            self.camera_init_thread.terminate()
+            self.camera_init_thread.wait(1000)
+        
+        # Show timeout message
+        if hasattr(self, 'video_label'):
+            self.video_label.setText("⚠ Camera Timeout\n(Check camera permissions/availability)")
+            self.video_label.setStyleSheet("""
+                background-color: #f9fafb;
+                border: 2px dashed #d1d5db;
+                border-radius: 12px;
+                color: #ef4444;
+                font-size: 16px;
+                font-weight: 500;
+            """)
+        
+        # Reset status
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("WAITING")
+            self.status_label.setStyleSheet("color: #6b7280; font-size: 24px; font-weight: 600;")
+    
+    def on_camera_initialized(self, camera):
+        """Handle camera initialization completion"""
+        if not self.camera_loading:
+            return  # Timeout already occurred
+        
+        self.camera = camera
+        self.camera_loading = False
+        
+        if self.camera is not None and self.camera.camera_available:
+            # Camera initialized successfully - start video timer
+            self.video_timer = QTimer()
+            self.video_timer.timeout.connect(self.update_video)
+            self.video_timer.start(30)
+            
+            # Update video label
+            if hasattr(self, 'video_label'):
+                self.video_label.setText("")
+            
+            # Now initialize ALPR engine
+            QTimer.singleShot(100, self.init_alpr_background)
+        else:
+            # Camera failed to initialize
+            if hasattr(self, 'video_label'):
+                self.video_label.setText("⚠ Camera Not Available")
+                self.video_label.setStyleSheet("""
+                    background-color: #f9fafb;
+                    border: 2px dashed #d1d5db;
+                    border-radius: 12px;
+                    color: #6b7280;
+                    font-size: 18px;
+                    font-weight: 500;
+                """)
+            
+            # Reset status
+            if hasattr(self, 'status_label'):
+                self.status_label.setText("WAITING")
+                self.status_label.setStyleSheet("color: #6b7280; font-size: 24px; font-weight: 600;")
+    
+    def init_alpr_background(self):
+        """Initialize ALPR engine in background thread"""
+        if self.alpr_loading:
+            return
+        
+        self.alpr_loading = True
+        
+        # Show loading status
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("LOADING ALPR...")
+            self.status_label.setStyleSheet("color: #f59e0b; font-size: 24px; font-weight: 600;")
+        
+        # Start initialization thread
+        self.alpr_init_thread = ALPRInitThread()
+        self.alpr_init_thread.initialization_status.connect(self.on_alpr_status)
+        self.alpr_init_thread.initialization_complete.connect(self.on_alpr_initialized)
+        self.alpr_init_thread.start()
+    
+    def on_alpr_status(self, message):
+        """Handle ALPR initialization status updates"""
+        print(message)
+        if hasattr(self, 'info_text'):
+            self.info_text.setHtml(f"""
+                <div style='font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;'>
+                    <p style='color: #f59e0b; margin: 4px 0;'><b>Status:</b> {message}</p>
+                    <p style='color: #6b7280; margin: 4px 0; font-size: 12px;'>This may take a moment...</p>
+                </div>
+            """)
+    
+    def on_alpr_initialized(self, alpr_engine):
+        """Handle ALPR initialization completion"""
+        print("\n" + "="*60)
+        print("🤖 ON_ALPR_INITIALIZED CALLED")
+        print("="*60)
+        
+        self.alpr_engine = alpr_engine
+        self.alpr_loading = False
+        
+        if self.alpr_engine is not None:
+            print("✅ ALPR Engine initialized successfully")
+            
+            # Start detection thread
+            if self.camera and self.camera.camera_available:
+                print("📷 Camera available, starting detection thread...")
+                self.detection_thread = DetectionThread(self.camera, self.alpr_engine)
+                print("🔗 Connecting detection_result signal to handle_detection...")
+                self.detection_thread.detection_result.connect(self.handle_detection)
+                print("✅ Signal connected!")
+                print("▶️  Starting detection thread...")
+                self.detection_thread.start()
+                print("✅ Detection thread started!")
+                
+                # Reset status display
+                if hasattr(self, 'status_label'):
+                    self.status_label.setText("WAITING")
+                    self.status_label.setStyleSheet("color: #6b7280; font-size: 24px; font-weight: 600;")
+                    print("✅ Status label set to WAITING")
+                
+                # Clear info text
+                if hasattr(self, 'info_text'):
+                    self.info_text.clear()
+                    print("✅ Info text cleared")
+                
+                print("\n🎉 SYSTEM READY FOR DETECTION!")
+                print("="*60 + "\n")
+            else:
+                print("❌ Camera not available, cannot start detection")
+        else:
+            print("❌ ALPR Engine failed to initialize")
+            # ALPR failed to initialize
+            if hasattr(self, 'status_label'):
+                self.status_label.setText("ALPR DISABLED")
+                self.status_label.setStyleSheet("color: #ef4444; font-size: 24px; font-weight: 600;")
+            
+            if hasattr(self, 'info_text'):
+                self.info_text.setHtml("""
+                    <div style='font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;'>
+                        <p style='color: #ef4444; margin: 4px 0;'><b>Error:</b> ALPR Engine failed to initialize</p>
+                        <p style='color: #6b7280; margin: 4px 0; font-size: 12px;'>Detection features will be disabled</p>
+                    </div>
+                """)
+    
     def closeEvent(self, event):
         """Handle application close"""
-        self.detection_thread.stop()
-        self.detection_thread.wait()
-        self.camera.release()
-        self.db.close()
+        # Stop initialization threads if running
+        if hasattr(self, 'camera_init_thread') and self.camera_init_thread.isRunning():
+            self.camera_init_thread.wait(1000)
+        if hasattr(self, 'alpr_init_thread') and self.alpr_init_thread.isRunning():
+            self.alpr_init_thread.wait(1000)
+        
+        # Stop detection thread
+        if self.detection_thread:
+            self.detection_thread.stop()
+            self.detection_thread.wait()
+        
+        # Release camera
+        if self.camera:
+            self.camera.release()
+        
+        # Close database
+        if self.db:
+            self.db.close()
+        
         event.accept()
 
 
 def main():
+    # #region agent log
+    _log("main_gui.py:main:1", "main() started, creating QApplication", {}, "D")
+    # #endregion
     app = QApplication(sys.argv)
     
-    # Set dark theme
+    # Modern light theme
+    # #region agent log
+    _log("main_gui.py:main:2", "Setting up theme", {}, "D")
+    # #endregion
     app.setStyle('Fusion')
     palette = app.palette()
-    palette.setColor(palette.Window, Qt.black)
-    palette.setColor(palette.WindowText, Qt.white)
-    palette.setColor(palette.Base, Qt.black)
-    palette.setColor(palette.AlternateBase, Qt.darkGray)
-    palette.setColor(palette.Text, Qt.white)
-    palette.setColor(palette.Button, Qt.darkGray)
-    palette.setColor(palette.ButtonText, Qt.white)
+    palette.setColor(palette.Window, QColor(249, 250, 251))
+    palette.setColor(palette.WindowText, QColor(17, 24, 39))
+    palette.setColor(palette.Base, QColor(255, 255, 255))
+    palette.setColor(palette.AlternateBase, QColor(249, 250, 251))
+    palette.setColor(palette.Text, QColor(17, 24, 39))
+    palette.setColor(palette.Button, QColor(255, 255, 255))
+    palette.setColor(palette.ButtonText, QColor(17, 24, 39))
+    palette.setColor(palette.Highlight, QColor(59, 130, 246))
+    palette.setColor(palette.HighlightedText, QColor(255, 255, 255))
     app.setPalette(palette)
     
+    app.setFont(QFont('Segoe UI', 10))
+    
+    # #region agent log
+    _log("main_gui.py:main:3", "Before creating ALPRMainWindow", {}, "D")
+    # #endregion
     window = ALPRMainWindow()
+    # #region agent log
+    _log("main_gui.py:main:4", "After creating ALPRMainWindow, before window.show()", {}, "D")
+    # #endregion
     window.show()
+    # #region agent log
+    _log("main_gui.py:main:5", "After window.show(), before app.exec_()", {}, "D")
+    # #endregion
     
     sys.exit(app.exec_())
 
