@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTableWidget, QTableWidgetItem, QLineEdit, 
                              QComboBox, QTextEdit, QMessageBox, QHeaderView,
                              QFrame, QGroupBox, QScrollArea, QStackedWidget,
-                             QSizePolicy, QSpacerItem)
+                             QSizePolicy, QSpacerItem, QFileDialog)
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread, QSize
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QIcon
 import cv2
@@ -108,6 +108,7 @@ class DetectionThread(QThread):
         self.camera = camera
         self.alpr_engine = alpr_engine
         self.running = False
+        self.paused = False
     
     def run(self):
         self.running = True
@@ -116,7 +117,7 @@ class DetectionThread(QThread):
         print("="*60 + "\n")
         
         while self.running:
-            if self.camera and self.camera.camera_available and self.alpr_engine:
+            if not self.paused and self.camera and self.camera.camera_available and self.alpr_engine:
                 ret, frame = self.camera.read()
                 if ret and frame is not None:
                     try:
@@ -132,6 +133,14 @@ class DetectionThread(QThread):
                             print(f"🎯 PLATE DETECTED: {result.get('plate_number')} (Confidence: {result.get('confidence'):.2%})")
                             print("🎯 "*20 + "\n")
                             print(f"📤 EMITTING DETECTION SIGNAL...")
+                            
+                            # Add the frame to the result for snapshot
+                            result['frame'] = frame.copy()
+                            
+                            # Pause detection after finding a plate
+                            self.paused = True
+                            print(f"⏸️  DETECTION PAUSED")
+                            
                             # #region agent log
                             _log("main_gui.py:DetectionThread:3", "Before emitting detection_result", {"plate_number": result.get('plate_number'), "confidence": result.get('confidence')}, "N")
                             # #endregion
@@ -147,6 +156,16 @@ class DetectionThread(QThread):
                         _log("main_gui.py:DetectionThread:5", "Exception in detection thread", {"error": str(e), "error_type": type(e).__name__}, "P")
                         # #endregion
             self.msleep(100)
+    
+    def pause(self):
+        """Pause detection"""
+        self.paused = True
+        print("⏸️  Detection paused")
+    
+    def resume(self):
+        """Resume detection"""
+        self.paused = False
+        print("▶️  Detection resumed")
     
     def stop(self):
         self.running = False
@@ -532,6 +551,93 @@ class ALPRMainWindow(QMainWindow):
         """)
         self.video_label.setAlignment(Qt.AlignCenter)
         video_layout.addWidget(self.video_label)
+        
+        # Preprocessed plate display
+        preprocess_title = QLabel("Preprocessed Plate (Sent to OCR)")
+        preprocess_title.setStyleSheet("color: #111827; font-size: 14px; font-weight: 600; padding-top: 15px; padding-bottom: 5px;")
+        video_layout.addWidget(preprocess_title)
+        
+        self.preprocessed_label = QLabel()
+        self.preprocessed_label.setMinimumSize(320, 80)
+        self.preprocessed_label.setMaximumSize(640, 120)
+        self.preprocessed_label.setStyleSheet("""
+            QLabel {
+                background-color: #1f2937;
+                border-radius: 8px;
+                border: 2px solid #374151;
+            }
+        """)
+        self.preprocessed_label.setAlignment(Qt.AlignCenter)
+        self.preprocessed_label.setText("No plate detected")
+        self.preprocessed_label.setStyleSheet("""
+            QLabel {
+                background-color: #1f2937;
+                border-radius: 8px;
+                border: 2px solid #374151;
+                color: #9ca3af;
+                font-size: 12px;
+            }
+        """)
+        video_layout.addWidget(self.preprocessed_label)
+        
+        # Buttons layout (horizontal)
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(10)
+        
+        # Resume button
+        self.resume_btn = QPushButton("▶️  Resume Detection")
+        self.resume_btn.clicked.connect(self.resume_detection)
+        self.resume_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 12px 24px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+            }
+            QPushButton:pressed {
+                background-color: #1d4ed8;
+            }
+            QPushButton:disabled {
+                background-color: #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        self.resume_btn.setEnabled(False)  # Disabled initially
+        buttons_layout.addWidget(self.resume_btn)
+        
+        # Upload Image button
+        self.upload_btn = QPushButton("📤  Upload Image")
+        self.upload_btn.clicked.connect(self.upload_and_process_image)
+        self.upload_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #10b981;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 12px 24px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #059669;
+            }
+            QPushButton:pressed {
+                background-color: #047857;
+            }
+            QPushButton:disabled {
+                background-color: #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        buttons_layout.addWidget(self.upload_btn)
+        
+        video_layout.addLayout(buttons_layout)
         
         # Status cards
         status_layout = QVBoxLayout()
@@ -1073,9 +1179,61 @@ class ALPRMainWindow(QMainWindow):
         try:
             plate_number = result['plate_number']
             confidence = result['confidence']
+            frame = result.get('frame')
             
             print(f"📋 Plate Number: {plate_number}")
             print(f"📊 Confidence: {confidence:.2%}")
+            
+            # Stop video timer to freeze the display
+            if self.video_timer and self.video_timer.isActive():
+                self.video_timer.stop()
+                print("⏸️  Video timer stopped")
+            
+            # Save and display snapshot
+            if frame is not None:
+                # Create snapshots directory if it doesn't exist
+                os.makedirs('snapshots', exist_ok=True)
+                
+                # Save snapshot with timestamp
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                snapshot_path = f'snapshots/{plate_number}_{timestamp}.jpg'
+                cv2.imwrite(snapshot_path, frame)
+                print(f"📸 Snapshot saved: {snapshot_path}")
+                
+                # Display the snapshot
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qt_image)
+                scaled_pixmap = pixmap.scaled(
+                    self.video_label.size(), 
+                    Qt.KeepAspectRatio, 
+                    Qt.SmoothTransformation
+                )
+                self.video_label.setPixmap(scaled_pixmap)
+                print(f"🖼️  Snapshot displayed on screen")
+            
+            # Display preprocessed plate image
+            preprocessed_img = result.get('preprocessed_image')
+            if preprocessed_img is not None:
+                # Convert grayscale to RGB for display
+                if len(preprocessed_img.shape) == 2:
+                    preprocessed_rgb = cv2.cvtColor(preprocessed_img, cv2.COLOR_GRAY2RGB)
+                else:
+                    preprocessed_rgb = preprocessed_img
+                
+                h, w, ch = preprocessed_rgb.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(preprocessed_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qt_image)
+                scaled_pixmap = pixmap.scaled(
+                    self.preprocessed_label.size(), 
+                    Qt.KeepAspectRatio, 
+                    Qt.SmoothTransformation
+                )
+                self.preprocessed_label.setPixmap(scaled_pixmap)
+                print(f"🔍 Preprocessed plate image displayed")
             
             # #region agent log
             _log("main_gui.py:handle_detection:2", "Before updating plate_label", {"plate_number": plate_number}, "O")
@@ -1178,12 +1336,14 @@ class ALPRMainWindow(QMainWindow):
                 # #endregion
                 print(f"❌ Error refreshing UI: {e}")
             
-            print(f"⏰ Setting 5-second timer to reset display...")
-            QTimer.singleShot(5000, self.reset_display)
-            print(f"✅ Timer set")
+            # Enable resume button
+            if hasattr(self, 'resume_btn'):
+                self.resume_btn.setEnabled(True)
+                print(f"✅ Resume button enabled")
             
             print("\n" + "="*60)
             print("🎉 HANDLE_DETECTION COMPLETED SUCCESSFULLY!")
+            print("🎉 Detection paused - Click 'Resume Detection' to continue")
             print("="*60 + "\n")
             
         except Exception as e:
@@ -1212,7 +1372,9 @@ class ALPRMainWindow(QMainWindow):
             """
             self.info_text.setHtml(info_html)
             
-            QTimer.singleShot(5000, self.reset_display)
+            # Enable resume button even on error
+            if hasattr(self, 'resume_btn'):
+                self.resume_btn.setEnabled(True)
     
     def reset_display(self):
         """Reset display to waiting state"""
@@ -1225,7 +1387,125 @@ class ALPRMainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #6b7280; font-size: 24px; font-weight: 600;")
         self.info_text.clear()
         
+        # Clear preprocessed plate display
+        if hasattr(self, 'preprocessed_label'):
+            self.preprocessed_label.clear()
+            self.preprocessed_label.setText("No plate detected")
+            self.preprocessed_label.setStyleSheet("""
+                QLabel {
+                    background-color: #1f2937;
+                    border-radius: 8px;
+                    border: 2px solid #374151;
+                    color: #9ca3af;
+                    font-size: 12px;
+                }
+            """)
+        
         print("✅ Display reset complete\n")
+    
+    def resume_detection(self):
+        """Resume detection after a plate was detected"""
+        print("\n" + "▶️ "*20)
+        print("▶️  RESUMING DETECTION")
+        print("▶️ "*20 + "\n")
+        
+        # Reset display
+        self.reset_display()
+        
+        # Resume video timer
+        if self.video_timer and self.camera and self.camera.camera_available:
+            if not self.video_timer.isActive():
+                self.video_timer.start(30)
+                print("▶️  Video timer resumed")
+        
+        # Resume detection thread
+        if self.detection_thread:
+            self.detection_thread.resume()
+            print("▶️  Detection thread resumed")
+        
+        # Disable resume button
+        if hasattr(self, 'resume_btn'):
+            self.resume_btn.setEnabled(False)
+            print("✅ Resume button disabled")
+        
+        print("\n" + "="*60)
+        print("🎉 DETECTION RESUMED - READY FOR NEXT VEHICLE!")
+        print("="*60 + "\n")
+    
+    def upload_and_process_image(self):
+        """Upload an image file and process it for license plate detection"""
+        print("\n" + "📤 "*20)
+        print("📤  UPLOAD IMAGE FOR PROCESSING")
+        print("📤 "*20 + "\n")
+        
+        # Open file dialog to select image
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select License Plate Image",
+            "",
+            "Image Files (*.jpg *.jpeg *.png *.bmp);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            print("❌ No file selected")
+            return
+        
+        print(f"📁 Selected file: {file_path}")
+        
+        try:
+            # Load image using OpenCV
+            frame = cv2.imread(file_path)
+            
+            if frame is None:
+                QMessageBox.warning(self, "Error", "Failed to load image. Please select a valid image file.")
+                print(f"❌ Failed to load image: {file_path}")
+                return
+            
+            print(f"✅ Image loaded successfully: {frame.shape}")
+            
+            # Check if ALPR engine is initialized
+            if not hasattr(self, 'alpr_engine') or self.alpr_engine is None:
+                QMessageBox.warning(self, "Error", "ALPR engine not initialized. Please wait for the system to fully start.")
+                print("❌ ALPR engine not initialized")
+                return
+            
+            print("🔍 Processing image through ALPR engine...")
+            
+            # Process image through ALPR engine
+            result = self.alpr_engine.process_frame(frame)
+            
+            if result is None:
+                QMessageBox.information(self, "No Detection", "No license plate detected in the uploaded image.")
+                print("❌ No plate detected in uploaded image")
+                return
+            
+            print(f"✅ Plate detected: {result.get('plate_number')} (Confidence: {result.get('confidence'):.2%})")
+            
+            # Add frame to result for display
+            result['frame'] = frame
+            
+            # Stop video timer if running
+            if hasattr(self, 'video_timer') and self.video_timer and self.video_timer.isActive():
+                self.video_timer.stop()
+                print("⏸️  Video timer stopped")
+            
+            # Pause detection thread if running
+            if hasattr(self, 'detection_thread') and self.detection_thread:
+                self.detection_thread.pause()
+                print("⏸️  Detection thread paused")
+            
+            # Process and display the detection result
+            self.handle_detection(result)
+            
+            print("\n" + "="*60)
+            print("🎉 IMAGE PROCESSING COMPLETED!")
+            print("="*60 + "\n")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to process image:\n{str(e)}")
+            print(f"❌ Error processing image: {e}")
+            import traceback
+            traceback.print_exc()
     
     def add_vehicle(self):
         """Add new vehicle to database"""

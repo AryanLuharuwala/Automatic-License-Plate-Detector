@@ -160,10 +160,10 @@ class ALPREngine:
         
         return resized
     
-    def read_plate_text(self, plate_img: np.ndarray) -> Optional[Tuple[str, float]]:
+    def read_plate_text(self, plate_img: np.ndarray) -> Optional[Tuple[str, float, np.ndarray]]:
         """
         Extract text from plate image using EasyOCR
-        Returns: (plate_text, confidence) or None
+        Returns: (plate_text, confidence, preprocessed_image) or None
         """
         # #region agent log
         _log("alpr_engine.py:read_plate_text:1", "read_plate_text() called", {"plate_img_shape": plate_img.shape if plate_img is not None else None}, "M")
@@ -210,18 +210,117 @@ class ALPREngine:
             # #endregion
             return None
         
-        return text, confidence
+        return text, confidence, processed
     
     def _clean_plate_text(self, text: str) -> str:
-        """Clean and format plate text"""
+        """Clean and format plate text with Indian license plate aware corrections"""
         # Remove spaces and special characters
         text = re.sub(r'[^A-Z0-9\-]', '', text.upper())
         
-        # Common OCR corrections
-        text = text.replace('O', '0')  # O to 0
-        text = text.replace('I', '1')  # I to 1
-        text = text.replace('S', '5')  # S to 5
-        text = text.replace('Z', '2')  # Z to 2
+        # Indian state codes for validation
+        indian_state_codes = {
+            'AP', 'AR', 'AS', 'BR', 'CG', 'CH', 'DD', 'DL', 'GA', 'GJ', 
+            'HP', 'HR', 'JH', 'JK', 'KA', 'KL', 'LA', 'LD', 'MH', 'ML', 
+            'MN', 'MP', 'MZ', 'NL', 'OD', 'OR', 'PB', 'PY', 'RJ', 'SK', 
+            'TN', 'TR', 'TS', 'UK', 'UP', 'WB'
+        }
+        
+        # Fix common OCR misreadings in state codes (first 2 characters)
+        if len(text) >= 2:
+            first_two = text[:2]
+            
+            # Common misreadings for Indian state codes
+            state_corrections = {
+                'TH': 'TN',  # Tamil Nadu misread
+                'HH': 'MH',  # Maharashtra misread  
+                'KH': 'KA',  # Karnataka misread
+                'PH': 'PB',  # Punjab misread
+                'WH': 'WB',  # West Bengal misread
+                'RH': 'RJ',  # Rajasthan misread
+                'HN': 'MN',  # Manipur misread
+                'HM': 'MM',  # Myanmar (though rare)
+                'NH': 'MH',  # Another Maharashtra misread
+                'TM': 'TN',  # Another Tamil Nadu misread
+            }
+            
+            if first_two in state_corrections:
+                text = state_corrections[first_two] + text[2:]
+                print(f"✓ State code corrected: {first_two} → {state_corrections[first_two]}")
+            elif first_two not in indian_state_codes:
+                # Try to fix if it looks like a misread
+                # H at position 0 or 1 is likely M or N
+                if first_two[0] == 'H':
+                    # Try common replacements
+                    for replacement in ['M', 'N', 'K', 'W', 'R']:
+                        candidate = replacement + first_two[1]
+                        if candidate in indian_state_codes:
+                            text = candidate + text[2:]
+                            print(f"✓ State code corrected: {first_two} → {candidate}")
+                            break
+                elif first_two[1] == 'H':
+                    # Second character is H, might be N
+                    for replacement in ['N', 'M', 'A', 'P', 'J', 'R', 'K', 'L']:
+                        candidate = first_two[0] + replacement
+                        if candidate in indian_state_codes:
+                            text = candidate + text[2:]
+                            print(f"✓ State code corrected: {first_two} → {candidate}")
+                            break
+        
+        # Common OCR corrections for numbers (but avoid in letter positions)
+        # Indian format is typically: XX-00-XX-0000 or XX00XX0000
+        # Letters appear at positions: 0-1 (state), and middle section
+        
+        # Apply number corrections more carefully
+        result = []
+        for i, char in enumerate(text):
+            # First two characters should be letters (state code)
+            if i < 2:
+                # Keep as letter, but fix common issues
+                if char == '0':
+                    result.append('O')
+                elif char == '1':
+                    result.append('I')
+                elif char == '5':
+                    result.append('S')
+                else:
+                    result.append(char)
+            # Characters 2-3 are typically numbers (district code)
+            elif i >= 2 and i < 4:
+                # Convert letters to numbers
+                if char == 'O':
+                    result.append('0')
+                elif char == 'I':
+                    result.append('1')
+                elif char == 'S':
+                    result.append('5')
+                elif char == 'Z':
+                    result.append('2')
+                else:
+                    result.append(char)
+            # Middle section can be letters (series)
+            elif i >= 4 and i < 8:
+                # Could be letters or numbers, apply conservative corrections
+                if char == 'O' and (i >= 6 or text[i-1].isdigit()):
+                    result.append('0')
+                elif char == 'I' and (i >= 6 or text[i-1].isdigit()):
+                    result.append('1')
+                else:
+                    result.append(char)
+            # End section is typically numbers
+            else:
+                # Convert letters to numbers
+                if char == 'O':
+                    result.append('0')
+                elif char == 'I':
+                    result.append('1')
+                elif char == 'S':
+                    result.append('5')
+                elif char == 'Z':
+                    result.append('2')
+                else:
+                    result.append(char)
+        
+        text = ''.join(result)
         
         return text
     
@@ -258,7 +357,7 @@ class ALPREngine:
         if ocr_result is None:
             return None
         
-        plate_text, ocr_confidence = ocr_result
+        plate_text, ocr_confidence, preprocessed_img = ocr_result
         # #region agent log
         _log("alpr_engine.py:process_frame:6", "OCR succeeded", {"plate_text": plate_text, "ocr_confidence": ocr_confidence}, "M")
         # #endregion
@@ -275,7 +374,8 @@ class ALPREngine:
             'confidence': combined_confidence,
             'detection_confidence': det_confidence,
             'ocr_confidence': ocr_confidence,
-            'plate_image': plate_img
+            'plate_image': plate_img,
+            'preprocessed_image': preprocessed_img
         }
     
     def draw_detection(self, frame: np.ndarray, result: dict) -> np.ndarray:
